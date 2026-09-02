@@ -17,7 +17,7 @@ into the game's binary assets, in two different places.
 | Where you see it | How it's stored | What the patch does |
 |---|---|---|
 | In-game dialogue and real-time cutscenes | A 24pt text field inside the HUD's Scaleform (Flash) movie, embedded in `BmGame.u` | Raises the field to 48pt (2-byte change; the Scaleform fonts are vector, so it stays sharp) |
-| Pre-rendered video cutscenes (`.bik`) and other engine subtitles | A bitmap font (`BmFonts.SmallFont`) with ~12px glyphs inside `Startup_INT.upk` | Rebuilds the font at 2x: decodes the DXT5 glyph atlas, upscales it 256→512 (Lanczos), re-encodes it, and doubles all 276 glyph metrics |
+| Pre-rendered video cutscenes (`.bik`) and other engine subtitles | A bitmap font (`BmFonts.SmallFont`) with ~12px glyphs inside `Startup_INT.upk` | Rebuilds the font at 4x: decodes the DXT5 glyph atlas, upscales it 256→1024 (Lanczos), re-encodes it, and scales all 276 glyph metrics |
 
 No game files are distributed by this repository — the patcher modifies **your
 own** copy of the game, and verifies every expected byte before writing
@@ -72,12 +72,21 @@ replace `Localization\INT` files) — this patch does not touch localization.
 
 ### Tuning
 
-Twice the size not to your taste? The HUD subtitle size is adjustable —
-re-run with any point size (the original is 24):
+Not to your taste? Both sizes are adjustable. The HUD (in-game dialogue)
+subtitle takes any point size — the original is 24:
 
 ```
 python patch.py --hud-size 36
 ```
+
+The cutscene/engine font supports 4x (default) or the milder 2x:
+
+```
+python patch.py --font-scale 2
+```
+
+Re-running the patcher applies the new sizes (it rebuilds from the backups
+it kept), no need to revert first.
 
 ## How to revert
 

@@ -11,9 +11,9 @@ This tool patches the user's own game files (no game content is distributed):
   1. BmGame.u ......... the HUD Flash movie's subtitle DefineEditText font
                         height is raised from 24pt to 48pt (2 bytes changed).
   2. Startup_INT.upk .. the engine subtitle font (BmFonts.SmallFont) is
-                        rebuilt at 2x: the DXT5 glyph atlas is decoded,
-                        upscaled 256->512 with Lanczos, re-encoded, and all
-                        276 glyph metrics are doubled.
+                        rebuilt at 4x (or 2x with --font-scale 2): the DXT5
+                        glyph atlas is decoded, upscaled with Lanczos,
+                        re-encoded, and all 276 glyph metrics are scaled.
 
 Both files are Unreal Engine 3 packages compressed with LZO; they are first
 decompressed with Gildor's freeware "decompress" tool (downloaded from
@@ -60,7 +60,6 @@ TEX_ENTRY_OFF = 98171            # export table entry of Texture2D 'SmallFont_Pa
 TEX_OFF, TEX_SIZE = 871773, 65812
 TEX_PROPS_END = 0xD4E35
 SIZEX_BODY, SIZEY_BODY, MIPTAIL_BODY = 0xD4D79, 0xD4D95, 0xD4DD1
-FONT_SCALE = 2
 
 
 def fail(msg):
@@ -192,7 +191,7 @@ def encode_dxt5(px, w, h):
     return bytes(out)
 
 
-def patch_startup(data):
+def patch_startup(data, font_scale):
     from PIL import Image
 
     def u32(o):
@@ -214,9 +213,9 @@ def patch_startup(data):
     mipdata = bytes(data[p:p + 65536])
     guid = bytes(data[p + 65536 + 8:p + 65536 + 24])
 
-    # rebuild atlas at 2x
+    # rebuild atlas at font_scale x
     img = Image.frombytes("RGBA", (256, 256), decode_dxt5(mipdata, 256, 256))
-    w2 = h2 = 256 * FONT_SCALE
+    w2 = h2 = 256 * font_scale
     big = img.resize((w2, h2), Image.LANCZOS)
     newmip = encode_dxt5(big.tobytes(), w2, h2)
 
@@ -229,7 +228,7 @@ def patch_startup(data):
 
     patch_u32(SIZEX_BODY, w2)
     patch_u32(SIZEY_BODY, h2)
-    patch_u32(MIPTAIL_BODY, 9)
+    patch_u32(MIPTAIL_BODY, w2.bit_length() - 1)
     tail = bytearray()
     tail += struct.pack("<4I", 0, 0, 0, new_off + len(blob) + 16)   # empty SourceArt
     tail += struct.pack("<I", 1)                                     # mip count
@@ -240,19 +239,19 @@ def patch_startup(data):
     tail += guid
     blob += tail
 
-    # double glyph metrics in place (StartU, StartV, USize, VSize, VerticalOffset)
+    # scale glyph metrics in place (StartU, StartV, USize, VSize, VerticalOffset)
     for k in range(cnt):
         e = FONT_CHAR_ARR + 4 + k * 21
         su, sv, us, vs = struct.unpack_from("<4i", data, e)
         vo = struct.unpack_from("<i", data, e + 17)[0]
-        struct.pack_into("<4i", data, e, su * FONT_SCALE, sv * FONT_SCALE,
-                         us * FONT_SCALE, vs * FONT_SCALE)
-        struct.pack_into("<i", data, e + 17, vo * FONT_SCALE)
+        struct.pack_into("<4i", data, e, su * font_scale, sv * font_scale,
+                         us * font_scale, vs * font_scale)
+        struct.pack_into("<i", data, e + 17, vo * font_scale)
 
     data += blob
     struct.pack_into("<i", data, TEX_ENTRY_OFF + 32, len(blob))      # SerialSize
     struct.pack_into("<i", data, TEX_ENTRY_OFF + 36, new_off)        # SerialOffset
-    print(f"Startup_INT.upk: subtitle font rebuilt at {FONT_SCALE}x "
+    print(f"Startup_INT.upk: subtitle font rebuilt at {font_scale}x "
           f"({cnt} glyphs, atlas {w2}x{h2})")
     return data
 
@@ -283,6 +282,8 @@ def main():
                     help="game install folder (default: %(default)s)")
     ap.add_argument("--hud-size", type=float, default=48.0,
                     help="HUD subtitle size in pt, original is 24 (default: %(default)s)")
+    ap.add_argument("--font-scale", type=int, default=4, choices=(2, 4),
+                    help="cutscene/engine subtitle font scale (default: %(default)s)")
     ap.add_argument("--revert", action="store_true",
                     help="restore the .original backup files and exit")
     args = ap.parse_args()
@@ -311,12 +312,21 @@ def main():
         # pristine file, so a size equal to the patched output means done.
         st_size = os.path.getsize(startup)
         if st_size not in (STARTUP_COMP_SIZE, STARTUP_DECOMP_SIZE):
-            print("Startup_INT.upk: already patched (or modified), skipping font rebuild")
-            st_data = None
+            bak = startup + ".original"
+            if os.path.isfile(bak):
+                print("Startup_INT.upk: already patched — rebuilding from backup ...")
+                shutil.copyfile(bak, startup)
+                st_data = load_package(startup, exe, workdir, STARTUP_COMP_SIZE,
+                                       STARTUP_DECOMP_SIZE, "Startup_INT.upk")
+                st_data = patch_startup(st_data, args.font_scale)
+            else:
+                print("Startup_INT.upk: already patched (or modified) and no backup "
+                      "found, skipping font rebuild")
+                st_data = None
         else:
             st_data = load_package(startup, exe, workdir, STARTUP_COMP_SIZE,
                                    STARTUP_DECOMP_SIZE, "Startup_INT.upk")
-            st_data = patch_startup(st_data)
+            st_data = patch_startup(st_data, args.font_scale)
 
         bm_data = load_package(bmgame, exe, workdir, BMGAME_COMP_SIZE,
                                BMGAME_DECOMP_SIZE, "BmGame.u")
