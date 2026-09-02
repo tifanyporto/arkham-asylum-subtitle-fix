@@ -332,16 +332,19 @@ def main():
                                BMGAME_DECOMP_SIZE, "BmGame.u")
         bm_data = patch_bmgame(bm_data, args.hud_size)
 
+    pristine_sizes = {bmgame: BMGAME_COMP_SIZE, startup: STARTUP_COMP_SIZE}
     for path, data in ((bmgame, bm_data), (startup, st_data)):
         if data is None:
             continue
         bak = path + ".original"
-        if not os.path.isfile(bak):
+        # only snapshot a backup when the on-disk file is the pristine
+        # compressed original — never a previously patched file
+        if not os.path.isfile(bak) and os.path.getsize(path) == pristine_sizes[path]:
             shutil.copyfile(path, bak)
         with open(path, "wb") as f:
             f.write(data)
-        print(f"installed {os.path.basename(path)} "
-              f"(backup: {os.path.basename(bak)})")
+        note = f" (backup: {os.path.basename(bak)})" if os.path.isfile(bak) else ""
+        print(f"installed {os.path.basename(path)}{note}")
 
     print("\nDone. Start the game and enjoy readable subtitles.")
     print("Note: Steam's 'Verify integrity of game files' undoes this patch.")
