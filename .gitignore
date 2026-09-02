@@ -3,3 +3,5 @@ unpacked/
 __pycache__/
 *.original
 *.bak
+fonts_en.gfx
+*.ttf

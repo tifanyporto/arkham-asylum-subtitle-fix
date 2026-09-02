@@ -1,31 +1,35 @@
 # Arkham Asylum Subtitle Fix
 
-Bigger, readable subtitles for **Batman: Arkham Asylum GOTY (Steam)** on modern displays.
+Bigger, sharp subtitles for **Batman: Arkham Asylum GOTY (Steam)** on modern displays.
 
 ## The problem
 
-The game renders subtitles at a fixed pixel size chosen in 2009 and offers no
-setting to change it. At 1440p, 4K, or on an ultrawide, subtitles are tiny to
-the point of being unreadable — a complaint you can find in forum threads going
-back over a decade, always answered with "there is no fix or mod for this".
+The game draws subtitles at a fixed pixel size chosen in 2009 and offers no
+setting to change it. At 1440p, 4K, or on an ultrawide they are tiny to the
+point of being unreadable — a complaint found in forum threads going back over
+a decade, always answered with "there is no fix or mod for this".
 
-There was no fix because there is no config value for it: the sizes are baked
-into the game's binary assets, in two different places.
+## What this does
 
-## What this patch does
+Dialogue subtitles are drawn by the engine with a bitmap font,
+`BmFonts.MediumFont` — the same font used for the "Loading" text and the
+"press X to skip" prompt in cutscenes. Its glyphs are 15 px tall, and the
+`SubtitleFontName` setting in the ini is ignored by the game, so the only way
+to get bigger subtitles is a bigger font.
 
-| Where you see it | How it's stored | What the patch does |
-|---|---|---|
-| In-game dialogue and real-time cutscenes | A 24pt text field inside the HUD's Scaleform (Flash) movie, embedded in `BmGame.u` | Raises the field to 48pt (2-byte change; the Scaleform fonts are vector, so it stays sharp) |
-| Pre-rendered video cutscenes (`.bik`) and other engine subtitles | A bitmap font (`BmFonts.SmallFont`) with ~12px glyphs inside `Startup_INT.upk` | Rebuilds the font at 4x: decodes the DXT5 glyph atlas, upscales it 256→1024 (Lanczos), re-encodes it, and scales all 276 glyph metrics |
+The patcher **re-renders that font at 2x** (any scale from 1.2 to 3 works) from
+a Rockwell TrueType font — the typeface the game uses — so the result is sharp,
+not a blurry upscale. It writes the new font into the two game packages that
+carry a copy of it (`Startup_INT.upk` and `CommonGame_LOC_INT.upk`).
 
-No game files are distributed by this repository — the patcher modifies **your
-own** copy of the game, and verifies every expected byte before writing
-anything, so on an unsupported version it aborts without touching your files.
-Backups are created automatically.
+Side effect, which most people will consider an improvement: the "Loading"
+text and the cutscene skip prompt get bigger too.
 
-Compatible with subtitle translation mods (e.g. PT-BR translations that
-replace `Localization\INT` files) — this patch does not touch localization.
+No game files are distributed by this repository. The patcher modifies **your
+own** copy of the game, parses and verifies every structure before writing,
+and keeps a `.original` backup of each file it touches. It works with subtitle
+translation mods (e.g. the PT-BR fan translation): they replace text, this
+replaces a font.
 
 ## Requirements
 
@@ -33,14 +37,17 @@ replace `Localization\INT` files) — this patch does not touch localization.
 - Batman: Arkham Asylum **GOTY** — **Steam** version
 - [Python 3.8+](https://www.python.org/downloads/) (check *"Add python.exe to PATH"* during install)
 - The Pillow imaging library (installed in step 2 below)
+- A **Rockwell** TrueType font. If Microsoft Office is installed you already
+  have it at `C:\Windows\Fonts\ROCK.TTF` and the patcher finds it by itself.
+  Otherwise see [Getting the font](#getting-the-font).
 
 ## How to apply
 
-1. **Close the game**, then open a terminal (press `Win+R`, type `cmd`, Enter)
-   and clone or [download](../../archive/refs/heads/main.zip) this repository:
+1. **Close the game**, open a terminal (`Win+R`, type `cmd`, Enter) and clone
+   or [download](../../archive/refs/heads/main.zip) this repository:
 
    ```
-   git clone https://github.com/YOURUSER/arkham-asylum-subtitle-fix.git
+   git clone https://github.com/tifanyporto/arkham-asylum-subtitle-fix.git
    cd arkham-asylum-subtitle-fix
    ```
 
@@ -62,65 +69,72 @@ replace `Localization\INT` files) — this patch does not touch localization.
    python patch.py --game-dir "D:\SteamLibrary\steamapps\common\Batman Arkham Asylum GOTY"
    ```
 
-   On first run the tool downloads Gildor's freeware UE3 package
-   decompressor (~100 KB) from [gildor.org](https://www.gildor.org/downloads),
-   the standard tool of the Unreal modding community for 20 years.
+   On first run the tool downloads Gildor's freeware UE3 package decompressor
+   (~100 KB) from [gildor.org](https://www.gildor.org/downloads).
 
-4. Start the game. Subtitles are now twice the size — both in-game dialogue
-   and the video cutscenes (the first line in the intro video appears about
-   30 seconds in, if you want a quick check).
+4. Start the game. Subtitles are now twice the size.
 
 ### Tuning
 
-Not to your taste? Both sizes are adjustable. The HUD (in-game dialogue)
-subtitle takes any point size — the original is 24:
-
 ```
-python patch.py --hud-size 36
+python patch.py --scale 1.5
+python patch.py --scale 2.5
 ```
 
-The cutscene/engine font supports 4x (default) or the milder 2x:
+Re-running the patcher rebuilds from the backups it kept, no need to revert
+first.
+
+### Getting the font
+
+Rockwell ships with Microsoft Office. If you don't have it, the game itself
+contains the vector version of the font; extract it once:
 
 ```
-python patch.py --font-scale 2
+python patch.py --dump-fontlib
 ```
 
-Re-running the patcher applies the new sizes (it rebuilds from the backups
-it kept), no need to revert first.
+This writes `fonts_en.gfx` next to the script. Open it in
+[JPEXS Free Flash Decompiler](https://github.com/jindrapetrik/jpexs-decompiler)
+(needs Java), go to *fonts → Rockwell WGL*, choose *Export selection → TTF*,
+then run:
+
+```
+python patch.py --font "Rockwell WGL.ttf"
+```
 
 ## How to revert
 
 ```
-python patch.py --revert
+python patch.py --restore
 ```
 
-This restores the `.original` backups created on the first run. Alternatively,
-**Verify integrity of game files** on Steam re-downloads the originals — which
-also means Steam's verification will *undo* this patch (and any other mod), so
-just re-run the patcher if that happens.
+This restores the `.original` backups. Alternatively, **Verify integrity of
+game files** on Steam re-downloads the originals — which also means Steam's
+verification *undoes* this patch, so just re-run the patcher if that happens.
 
 ## Technical notes
 
 - Both packages are LZO-compressed UE3 packages (version 576, licensee 21).
-  They are decompressed once; the game engine loads decompressed packages
-  natively, they are simply larger on disk.
-- The HUD subtitle field is `DefineEditText` character 171 (sprite 173,
-  exported as `Subtitles`, driven by `rs.hud.Subtitle.SetText` — which
-  receives a size argument from the game and ignores it) inside the
-  `GFxMovieInfo 'HUD'` asset of `BmGame.u`.
-- The engine font rebuild appends the new 512x512 texture as a relocated
-  export at the end of `Startup_INT.upk` and repoints the export table entry
-  (`SerialSize`/`SerialOffset`), so no other offset in the package moves.
-  Glyph metrics (`FontCharacter`: StartU/StartV/USize/VSize/VerticalOffset)
-  are doubled in place.
-- The interview-tape subtitles in the bio menus use a third, separate text
-  field (in the `CharacterBio` Scaleform movie) that renders at menu scale
-  and is left untouched.
+  They are decompressed once; the engine loads decompressed packages natively.
+- The font is a `UFont` with 276 `FontCharacter` entries (StartU, StartV,
+  USize, VSize, page, VerticalOffset) and a `CharRemap` map, plus one or two
+  DXT5 texture pages. The patcher renders each glyph with the TrueType font at
+  the size whose cap height matches the original scaled, packs them into a
+  1024-wide atlas, re-encodes DXT5, appends the new texture as a relocated
+  export at the end of the package and repoints its export-table entry, and
+  rewrites the metrics in place. Nothing else in the package moves.
+- The same font object exists in `Startup_INT.upk` and in
+  `CommonGame_LOC_INT.upk`; the engine keeps whichever it loads first, so both
+  are patched.
+- Things that do **not** control the subtitle size, verified in-game: the
+  `SubtitleFontName` ini setting, `BmFonts.SmallFont`, and the Scaleform text
+  fields inside the HUD movie in `BmGame.u`.
 
 ## Credits
 
-- [Gildor's decompress & UE Viewer](https://www.gildor.org/) — UE3 package tooling
-- [JPEXS Free Flash Decompiler](https://github.com/jindrapetrik/jpexs-decompiler) — used to reverse-engineer the HUD movie
+- [Gildor's decompress](https://www.gildor.org/) — UE3 package decompression
+- [JPEXS Free Flash Decompiler](https://github.com/jindrapetrik/jpexs-decompiler) — font extraction
+- Rockwell is a typeface of Monotype; no font file is distributed here
 
 ## License
 
