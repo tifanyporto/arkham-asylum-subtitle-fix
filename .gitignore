@@ -1,0 +1,5 @@
+tools/
+unpacked/
+__pycache__/
+*.original
+*.bak
