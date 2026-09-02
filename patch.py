@@ -54,12 +54,34 @@ HUD_ORIGINAL_TWIPS = 480         # 24 pt
 
 STARTUP_DECOMP_SIZE = 1972496
 STARTUP_COMP_SIZE = 798701
-FONT_CHAR_ARR = 0x1E9E5          # Font 'SmallFont' Characters array body
-FONT_CHAR_COUNT = 276
-TEX_ENTRY_OFF = 98171            # export table entry of Texture2D 'SmallFont_PageA'
-TEX_OFF, TEX_SIZE = 871773, 65812
-TEX_PROPS_END = 0xD4E35
-SIZEX_BODY, SIZEY_BODY, MIPTAIL_BODY = 0xD4D79, 0xD4D95, 0xD4DD1
+
+# The engine's subtitle fonts. MediumFont is what the game actually uses for
+# dialogue and movie subtitles (the SubtitleFontName ini setting is ignored);
+# SmallFont is patched too for completeness. Offsets are for the pristine
+# decompressed Startup_INT.upk. Each page: (export table entry offset,
+# export data offset, end of property list, SizeX/SizeY/MipTailBaseIdx
+# value offsets, width, height).
+FONTS = [
+    {
+        "name": "MediumFont", "char_arr": 0x1CD87, "count": 276,
+        "pages": [
+            {"entry": 97899, "off": 787745, "props_end": 0xC05F9,
+             "sizex": 0xC053D, "sizey": 0xC0559, "miptail": 0xC0595,
+             "w": 256, "h": 256},
+            {"entry": 97967, "off": 853557, "props_end": 0xD070D,
+             "sizex": 0xD0651, "sizey": 0xD066D, "miptail": 0xD06A9,
+             "w": 256, "h": 32},
+        ],
+    },
+    {
+        "name": "SmallFont", "char_arr": 0x1E9E5, "count": 276,
+        "pages": [
+            {"entry": 98171, "off": 871773, "props_end": 0xD4E35,
+             "sizex": 0xD4D79, "sizey": 0xD4D95, "miptail": 0xD4DD1,
+             "w": 256, "h": 256},
+        ],
+    },
+]
 
 
 def fail(msg):
@@ -191,44 +213,40 @@ def encode_dxt5(px, w, h):
     return bytes(out)
 
 
-def patch_startup(data, font_scale):
+def rebuild_page(data, page, font_scale):
+    """Rebuild one font texture page at font_scale x; returns modified data."""
     from PIL import Image
 
     def u32(o):
         return struct.unpack_from("<I", data, o)[0]
 
-    cnt = u32(FONT_CHAR_ARR)
-    if cnt != FONT_CHAR_COUNT:
-        fail(f"Startup_INT.upk: unexpected glyph count {cnt} (unsupported build)")
-
-    # locate the single 256x256 DXT5 mip of SmallFont_PageA
-    p = TEX_PROPS_END + 16          # skip empty SourceArt bulk header
+    w, h = page["w"], page["h"]
+    p = page["props_end"] + 16      # skip empty SourceArt bulk header
     if u32(p) != 1:
         fail("Startup_INT.upk: unexpected mip count (unsupported build)")
     p += 4
     m_cnt, m_off = u32(p + 4), u32(p + 12)
     p += 16
-    if m_cnt != 65536 or m_off != p:
+    if m_cnt != w * h or m_off != p:
         fail("Startup_INT.upk: unexpected texture layout (unsupported build)")
-    mipdata = bytes(data[p:p + 65536])
-    guid = bytes(data[p + 65536 + 8:p + 65536 + 24])
+    mipdata = bytes(data[p:p + m_cnt])
+    guid = bytes(data[p + m_cnt + 8:p + m_cnt + 24])
 
-    # rebuild atlas at font_scale x
-    img = Image.frombytes("RGBA", (256, 256), decode_dxt5(mipdata, 256, 256))
-    w2 = h2 = 256 * font_scale
+    img = Image.frombytes("RGBA", (w, h), decode_dxt5(mipdata, w, h))
+    w2, h2 = w * font_scale, h * font_scale
     big = img.resize((w2, h2), Image.LANCZOS)
     newmip = encode_dxt5(big.tobytes(), w2, h2)
 
     # new Texture2D export blob appended at EOF
     new_off = len(data)
-    blob = bytearray(data[TEX_OFF:TEX_PROPS_END])
+    blob = bytearray(data[page["off"]:page["props_end"]])
 
     def patch_u32(abs_off, val):
-        struct.pack_into("<I", blob, abs_off - TEX_OFF, val)
+        struct.pack_into("<I", blob, abs_off - page["off"], val)
 
-    patch_u32(SIZEX_BODY, w2)
-    patch_u32(SIZEY_BODY, h2)
-    patch_u32(MIPTAIL_BODY, w2.bit_length() - 1)
+    patch_u32(page["sizex"], w2)
+    patch_u32(page["sizey"], h2)
+    patch_u32(page["miptail"], max(w2, h2).bit_length() - 1)
     tail = bytearray()
     tail += struct.pack("<4I", 0, 0, 0, new_off + len(blob) + 16)   # empty SourceArt
     tail += struct.pack("<I", 1)                                     # mip count
@@ -239,20 +257,33 @@ def patch_startup(data, font_scale):
     tail += guid
     blob += tail
 
-    # scale glyph metrics in place (StartU, StartV, USize, VSize, VerticalOffset)
-    for k in range(cnt):
-        e = FONT_CHAR_ARR + 4 + k * 21
-        su, sv, us, vs = struct.unpack_from("<4i", data, e)
-        vo = struct.unpack_from("<i", data, e + 17)[0]
-        struct.pack_into("<4i", data, e, su * font_scale, sv * font_scale,
-                         us * font_scale, vs * font_scale)
-        struct.pack_into("<i", data, e + 17, vo * font_scale)
-
     data += blob
-    struct.pack_into("<i", data, TEX_ENTRY_OFF + 32, len(blob))      # SerialSize
-    struct.pack_into("<i", data, TEX_ENTRY_OFF + 36, new_off)        # SerialOffset
-    print(f"Startup_INT.upk: subtitle font rebuilt at {font_scale}x "
-          f"({cnt} glyphs, atlas {w2}x{h2})")
+    struct.pack_into("<i", data, page["entry"] + 32, len(blob))      # SerialSize
+    struct.pack_into("<i", data, page["entry"] + 36, new_off)        # SerialOffset
+    return data
+
+
+def patch_startup(data, font_scale):
+    def u32(o):
+        return struct.unpack_from("<I", data, o)[0]
+
+    for font in FONTS:
+        cnt = u32(font["char_arr"])
+        if cnt != font["count"]:
+            fail(f"Startup_INT.upk: unexpected glyph count {cnt} for "
+                 f"{font['name']} (unsupported build)")
+        for page in font["pages"]:
+            data = rebuild_page(data, page, font_scale)
+        # scale glyph metrics in place (StartU/StartV/USize/VSize/VerticalOffset)
+        for k in range(cnt):
+            e = font["char_arr"] + 4 + k * 21
+            su, sv, us, vs = struct.unpack_from("<4i", data, e)
+            vo = struct.unpack_from("<i", data, e + 17)[0]
+            struct.pack_into("<4i", data, e, su * font_scale, sv * font_scale,
+                             us * font_scale, vs * font_scale)
+            struct.pack_into("<i", data, e + 17, vo * font_scale)
+        print(f"Startup_INT.upk: {font['name']} rebuilt at {font_scale}x "
+              f"({cnt} glyphs, {len(font['pages'])} page(s))")
     return data
 
 
