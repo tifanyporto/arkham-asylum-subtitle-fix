@@ -1,0 +1,39 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install pillow pyinstaller
+      - name: Fetch Gildor's decompress tool
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force tools | Out-Null
+          Invoke-WebRequest -Uri https://www.gildor.org/down/47/umodel/decompress.zip -OutFile decompress.zip
+          Expand-Archive decompress.zip -DestinationPath tools -Force
+          Get-ChildItem -Recurse tools -Filter decompress.exe | Select-Object -First 1 | ForEach-Object { Copy-Item $_.FullName tools\decompress.exe -Force }
+          if (-not (Test-Path tools\decompress.exe)) { throw "decompress.exe not found" }
+      - name: Build exe
+        run: python -m PyInstaller --onefile --console --name ArkhamSubtitleFix --add-binary "tools/decompress.exe;tools" patch.py
+      - name: Smoke test
+        run: dist\ArkhamSubtitleFix.exe --help
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/ArkhamSubtitleFix.exe
+          body: |
+            Download `ArkhamSubtitleFix.exe`, close the game, double-click it and press `1`.
+            Baixe o `ArkhamSubtitleFix.exe`, feche o jogo, dê dois cliques nele e aperte `1`.
+
+            See the README for details and for running from source.
