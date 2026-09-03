@@ -7,29 +7,31 @@ BmFonts.MediumFont (the same font used for "Loading" and the cutscene
 adapted to the screen resolution, so on 1440p / 4K / ultrawide displays the
 subtitles are tiny. The SubtitleFontName ini setting is ignored by the game.
 
-This tool re-renders that font at a larger size from a Rockwell TrueType
-font (the typeface the game uses) and writes it into the two packages that
-carry a copy of it. It patches YOUR OWN game files - no game content is
-distributed. Every structure is parsed and verified before writing; on an
-unexpected file layout it aborts without touching anything, and it keeps a
-".original" backup of each file it replaces.
+This tool re-renders that font at a larger size from the vector Rockwell
+font that ships inside the game itself (the Scaleform font library), and
+writes it into the two packages that carry a copy of the bitmap font. It
+patches YOUR OWN game files - no game content is distributed. Every structure
+is parsed and verified before writing; on an unexpected file layout it aborts
+without touching anything, and it keeps a ".original" backup of each file it
+replaces.
 
-Usage:
-  python patch.py                          # patch, default Steam location, 2x
-  python patch.py --scale 1.5              # any scale between 1.2 and 3
-  python patch.py --game-dir "D:\\Steam\\steamapps\\common\\Batman Arkham Asylum GOTY"
-  python patch.py --font "C:\\path\\to\\Rockwell.ttf"
-  python patch.py --dump-fontlib           # extract fonts_en.gfx (see README)
+Double-click the .exe (or run "python patch.py" with no arguments) for an
+interactive menu. Command line:
+
+  python patch.py --apply                  # patch at 2x, auto-detect Steam
+  python patch.py --apply --scale 1.5      # any scale between 1.2 and 3
+  python patch.py --apply --game-dir "D:\\SteamLibrary\\steamapps\\common\\Batman Arkham Asylum GOTY"
+  python patch.py --apply --font Rockwell.ttf   # render from a TrueType file instead
   python patch.py --restore                # put the original files back
 
-Requires: Windows, Python 3.8+, Pillow, and a Rockwell TrueType font
-(auto-detected at C:\\Windows\\Fonts\\ROCK.TTF when Microsoft Office is installed).
+Requires Windows, Python 3.8+ and Pillow (the .exe release bundles both).
 """
 
 import argparse
 import io
 import math
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -43,10 +45,11 @@ try:
 except ImportError:
     sys.exit("Pillow is required:  pip install -r requirements.txt")
 
-DEFAULT_GAME_DIR = r"C:\Program Files (x86)\Steam\steamapps\common\Batman Arkham Asylum GOTY"
 DECOMPRESS_URL = "https://www.gildor.org/down/47/umodel/decompress.zip"
 FONT_NAME = "BmFonts.MediumFont"
-DEFAULT_TTF = r"C:\Windows\Fonts\ROCK.TTF"
+FONTLIB_EXPORT = "fonts_en.fonts_en"
+FONTLIB_FACE = "Rockwell WGL"
+GAME_FOLDER = "Batman Arkham Asylum GOTY"
 PKG_STORE_COMPRESSED = 0x02000000
 
 
@@ -200,9 +203,188 @@ def encode_dxt5(px, w, h):
 
 
 # ----------------------------------------------------------------------------
+# SWF / GFX DefineFont3 parser + glyph rasterizer
+# ----------------------------------------------------------------------------
+class Bits:
+    def __init__(self, data, pos=0):
+        self.data, self.pos, self.bit = data, pos, 0
+
+    def ub(self, n):
+        v = 0
+        for _ in range(n):
+            v = (v << 1) | ((self.data[self.pos] >> (7 - self.bit)) & 1)
+            self.bit += 1
+            if self.bit == 8:
+                self.bit = 0; self.pos += 1
+        return v
+
+    def sb(self, n):
+        v = self.ub(n)
+        return v - (1 << n) if n and v & (1 << (n - 1)) else v
+
+
+def parse_glyph_shape(b):
+    nfill = b.ub(4); nline = b.ub(4)
+    x = y = 0; contours = []; cur = []
+    while True:
+        if b.ub(1) == 0:
+            flags = b.ub(5)
+            if flags == 0:
+                break
+            if flags & 1:
+                nb = b.ub(5); x = b.sb(nb); y = b.sb(nb)
+                if cur: contours.append(cur)
+                cur = [(x, y)]
+            if flags & 2: b.ub(nfill)
+            if flags & 4: b.ub(nfill)
+            if flags & 8: b.ub(nline)
+            if flags & 16:
+                raise ValueError("unexpected style record in glyph")
+        else:
+            if b.ub(1):
+                nb = b.ub(4) + 2
+                if b.ub(1):
+                    x += b.sb(nb); y += b.sb(nb)
+                elif b.ub(1):
+                    y += b.sb(nb)
+                else:
+                    x += b.sb(nb)
+                cur.append((x, y))
+            else:
+                nb = b.ub(4) + 2
+                cx = x + b.sb(nb); cy = y + b.sb(nb)
+                ax = cx + b.sb(nb); ay = cy + b.sb(nb)
+                x0, y0 = x, y
+                for i in range(1, 9):
+                    t = i / 8
+                    cur.append(((1 - t) ** 2 * x0 + 2 * (1 - t) * t * cx + t * t * ax,
+                                (1 - t) ** 2 * y0 + 2 * (1 - t) * t * cy + t * t * ay))
+                x, y = ax, ay
+    if cur: contours.append(cur)
+    return contours
+
+
+def parse_swf_fonts(swf):
+    if swf[:3] not in (b"GFX", b"FWS"):
+        raise ValueError("not an uncompressed SWF/GFX movie")
+    p = 8
+    nbits = swf[p] >> 3; p += (5 + nbits * 4 + 7) // 8 + 4
+    fonts = {}
+    while p < len(swf):
+        cl = struct.unpack_from("<H", swf, p)[0]; code, ln = cl >> 6, cl & 0x3F; p += 2
+        if ln == 0x3F: ln = struct.unpack_from("<I", swf, p)[0]; p += 4
+        body = swf[p:p + ln]; p += ln
+        if code == 0: break
+        if code != 75: continue
+        o = 2
+        flags = body[o]; o += 2
+        nlen = body[o]; o += 1
+        name = body[o:o + nlen].split(b"\0")[0].decode("latin-1"); o += nlen
+        n = struct.unpack_from("<H", body, o)[0]; o += 2
+        fmt, sz = ("<I", 4) if flags & 0x08 else ("<H", 2)
+        table = o
+        offs = [struct.unpack_from(fmt, body, table + i * sz)[0] for i in range(n)]
+        code_off = struct.unpack_from(fmt, body, table + n * sz)[0]
+        shapes = [parse_glyph_shape(Bits(body, table + offs[i])) for i in range(n)]
+        o = table + code_off
+        codes = [struct.unpack_from("<H", body, o + 2 * i)[0] for i in range(n)]; o += 2 * n
+        if not flags & 0x80:
+            continue
+        asc, desc, lead = struct.unpack_from("<hhh", body, o); o += 6
+        adv = [struct.unpack_from("<h", body, o + 2 * i)[0] for i in range(n)]
+        fonts[name] = dict(codes={c: i for i, c in enumerate(codes)}, shapes=shapes, ascent=asc, advance=adv)
+    return fonts
+
+
+def rasterize_contours(contours, scale, ss=4):
+    xs = [x for c in contours for x, y in c]; ys = [y for c in contours for x, y in c]
+    if not xs:
+        return None, 0, 0
+    x0 = math.floor(min(xs) * scale) - 1; y0 = math.floor(min(ys) * scale) - 1
+    x1 = math.ceil(max(xs) * scale) + 1; y1 = math.ceil(max(ys) * scale) + 1
+    W, H = (x1 - x0) * ss, (y1 - y0) * ss
+    edges = []
+    for c in contours:
+        pts = [((x * scale - x0) * ss, (y * scale - y0) * ss) for x, y in c]
+        if pts[0] != pts[-1]: pts.append(pts[0])
+        for (ax, ay), (bx, by) in zip(pts, pts[1:]):
+            if ay != by: edges.append((ax, ay, bx, by))
+    buf = bytearray(W * H)
+    for row in range(H):
+        sy = row + 0.5
+        cross = []
+        for ax, ay, bx, by in edges:
+            if (ay <= sy < by) or (by <= sy < ay):
+                cross.append((ax + (sy - ay) * (bx - ax) / (by - ay), 1 if by > ay else -1))
+        if not cross: continue
+        cross.sort(); wind = 0; base = row * W
+        for i in range(len(cross) - 1):
+            wind += cross[i][1]
+            if wind != 0:
+                a = max(0, int(round(cross[i][0]))); b = min(W, int(round(cross[i + 1][0])))
+                if b > a: buf[base + a:base + b] = b"\xff" * (b - a)
+    img = Image.frombytes("L", (W, H), bytes(buf)).resize((W // ss, H // ss), Image.BOX)
+    return img, x0, y0
+
+
+class SwfGlyphs:
+    """Glyph source: a DefineFont3 face from the game's own font library."""
+    def __init__(self, swf, face):
+        fonts = parse_swf_fonts(swf)
+        if face not in fonts:
+            raise ValueError("font %r not in font library (found: %s)" % (face, ", ".join(fonts)))
+        self.f = fonts[face]
+        self.label = face + " (from the game's font library)"
+
+    def has(self, ch): return ord(ch) in self.f["codes"]
+
+    def cap_height(self, scale):
+        c = self.f["shapes"][self.f["codes"][ord("A")]]
+        ys = [y for cc in c for x, y in cc]
+        return (max(ys) - min(ys)) * scale
+
+    def calibrate(self, target_cap_px):
+        return target_cap_px / self.cap_height(1.0)
+
+    def render(self, ch, scale):
+        """-> (L image or None, left, top relative to (pen x, baseline), advance px)"""
+        gi = self.f["codes"][ord(ch)]
+        img, x0, y0 = rasterize_contours(self.f["shapes"][gi], scale)
+        return img, x0, y0, self.f["advance"][gi] * scale
+
+
+class TtfGlyphs:
+    """Glyph source: a TrueType file (Pillow)."""
+    def __init__(self, path, target_cap_px):
+        best = None
+        for size in range(8, 400):
+            f = ImageFont.truetype(path, size); b = f.getbbox("A"); h = b[3] - b[1]
+            if best is None or abs(h - target_cap_px) < abs(best[1] - target_cap_px): best = (size, h)
+            if h > target_cap_px + 3: break
+        self.font = ImageFont.truetype(path, best[0])
+        self.asc = self.font.getmetrics()[0]
+        self.label = "%s at %d px" % (os.path.basename(path), best[0])
+
+    def has(self, ch):
+        b = self.font.getbbox(ch)
+        return b is not None and b[2] - b[0] > 0 and b != self.font.getbbox("\ufffd")
+
+    def calibrate(self, target_cap_px): return 1.0
+
+    def render(self, ch, scale):
+        b = self.font.getbbox(ch); adv = self.font.getlength(ch)
+        if b is None or b[2] - b[0] == 0:
+            return None, 0, 0, adv
+        l, t, r, btm = b
+        canvas = Image.new("L", (r + 2, btm + 2), 0)
+        ImageDraw.Draw(canvas).text((0, 0), ch, font=self.font, fill=255)
+        return canvas.crop((l, t, r, btm)), l, t - self.asc, adv
+
+
+# ----------------------------------------------------------------------------
 # Font rebuild
 # ----------------------------------------------------------------------------
-def rebuild_font(pkg, font_path, ttf, fallback_ttf, scale, log):
+def rebuild_font(pkg, font_path, glyphs, scale, log):
     d = pkg.data
     fe = pkg.export(font_path)
     if pkg.objname(fe["cls"]) != "Font":
@@ -229,7 +411,6 @@ def rebuild_font(pkg, font_path, ttf, fallback_ttf, scale, log):
     baseline = chars[65]["vo"] + capA
     log("  %s: %d glyphs, line %d px, cap height %d px, %d texture page(s)" % (font_path, cnt, line_h, capA, len(texrefs)))
 
-    # original pages (icon glyphs are kept, upscaled)
     pages_img = []
     for ref in texrefs:
         te = pkg.exports[ref - 1]
@@ -240,49 +421,30 @@ def rebuild_font(pkg, font_path, ttf, fallback_ttf, scale, log):
         q = tend + 16 + 4 + 16
         pages_img.append(Image.frombytes("RGBA", (sx, sy), bytes(decode_dxt5(bytes(d[q:q + sx * sy]), sx, sy))))
 
-    target_cap = round(capA * scale)
-    best = None
-    for size in range(8, 300):
-        f = ImageFont.truetype(ttf, size)
-        b = f.getbbox("A"); h = b[3] - b[1]
-        if best is None or abs(h - target_cap) < abs(best[1] - target_cap):
-            best = (size, h)
-        if h > target_cap + 3:
-            break
-    SIZE = best[0]
-    font = ImageFont.truetype(ttf, SIZE)
-    fb = ImageFont.truetype(fallback_ttf, SIZE) if fallback_ttf else None
-    asc, _ = font.getmetrics()
     L = round(line_h * scale)
     BASE = round(baseline * scale)
-    log("  rendering with %s at %d px (cap height %d px), line %d px" % (os.path.basename(ttf), SIZE, best[1], L))
-
-    def has_glyph(f, ch):
-        b = f.getbbox(ch)
-        return b is not None and b[2] - b[0] > 0 and b != f.getbbox("\ufffd")
+    gscale = glyphs.calibrate(round(capA * scale))
+    log("  rendering %s, cap height %d px, line %d px" % (glyphs.label, round(capA * scale), L))
 
     tiles = []
     for i, c in enumerate(chars):
         u = remap.get(i, i)
         if c["us"] == 0 and c["vs"] == 0:
             tiles.append((i, None, 0, 0, 0)); continue
-        if u >= 0x4700 or u in (0xA0D, 0xD00):   # icon glyphs: keep, upscale
+        ch = chr(u)
+        if u >= 0x4700 or u in (0xA0D, 0xD00) or not glyphs.has(ch):   # icons / unknown: keep, upscale
             img = pages_img[c["page"]].crop((c["su"], c["sv"], c["su"] + c["us"], c["sv"] + c["vs"])).getchannel("A")
             w, h = max(1, round(c["us"] * scale)), max(1, round(c["vs"] * scale))
             tiles.append((i, img.resize((w, h), Image.LANCZOS), w, h, round(c["vo"] * scale))); continue
-        ch = chr(u)
-        f = font if has_glyph(font, ch) else (fb if fb and has_glyph(fb, ch) else font)
-        adv = f.getlength(ch); b = f.getbbox(ch)
-        if b is None or b[2] - b[0] == 0 or ch == " ":
+        img, gl, gt, adv = glyphs.render(ch, gscale)
+        if img is None or ch == " ":
             w = max(1, round(adv)); tiles.append((i, Image.new("L", (w, L), 0), w, L, 0)); continue
-        l, t, r, btm = b
-        w = max(round(adv), r + 1)
-        top = BASE - asc + t
+        w = max(round(adv), gl + img.width + 1)
+        top = BASE + gt                       # glyph top in line coordinates
         vo = max(0, top)
-        vs = btm - t - (vo - top)
-        canvas = Image.new("L", (w + 4, L + 40), 0)
-        ImageDraw.Draw(canvas).text((0, BASE - asc + 20), ch, font=f, fill=255)
-        tiles.append((i, canvas.crop((0, 20 + vo, w, 20 + vo + vs)), w, vs, vo))
+        tile = Image.new("L", (w, img.height - (vo - top)), 0)
+        tile.paste(img, (max(0, gl), top - vo))
+        tiles.append((i, tile, w, tile.height, vo))
 
     def rgba(tile):
         return Image.merge("RGBA", (Image.new("L", tile.size, 255),) * 3 + (tile,))
@@ -337,23 +499,39 @@ def rebuild_font(pkg, font_path, ttf, fallback_ttf, scale, log):
         log("  texture page %d: %dx%d" % (pi, W, H))
 
 
+def extract_fontlib(pkg):
+    e = pkg.export(FONTLIB_EXPORT)
+    blob = pkg.data[e["off"]:e["off"] + e["size"]]
+    g = blob.find(b"GFX")
+    if g < 0 or g > 4096:
+        raise ValueError("font library movie not found in " + pkg.path)
+    flen = struct.unpack_from("<I", blob, g + 4)[0]
+    return bytes(blob[g:g + flen])
+
+
 # ----------------------------------------------------------------------------
-# decompress.exe (Gildor)
+# decompress.exe (Gildor), Steam detection
 # ----------------------------------------------------------------------------
-def get_decompressor(tools_dir):
-    exe = os.path.join(tools_dir, "decompress.exe")
-    if os.path.exists(exe):
-        return exe
-    os.makedirs(tools_dir, exist_ok=True)
+def base_dir():
+    return getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+
+
+def get_decompressor():
+    for cand in (os.path.join(base_dir(), "tools", "decompress.exe"),
+                 os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "tools", "decompress.exe")):
+        if os.path.exists(cand):
+            return cand
+    tools = os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "tools")
+    os.makedirs(tools, exist_ok=True)
+    exe = os.path.join(tools, "decompress.exe")
     print("Downloading Gildor's decompress tool from %s ..." % DECOMPRESS_URL)
     data = urllib.request.urlopen(DECOMPRESS_URL, timeout=60).read()
     with zipfile.ZipFile(io.BytesIO(data)) as z:
         for n in z.namelist():
             if n.lower().endswith("decompress.exe"):
-                open(exe, "wb").write(z.read(n))
-                break
+                open(exe, "wb").write(z.read(n)); break
     if not os.path.exists(exe):
-        sys.exit("could not obtain decompress.exe - download it from gildor.org and put it in " + tools_dir)
+        raise RuntimeError("could not obtain decompress.exe - download it from gildor.org into " + tools)
     return exe
 
 
@@ -367,75 +545,149 @@ def decompress(exe, src):
     raise RuntimeError("decompression failed for " + src)
 
 
+def find_game_dir():
+    roots = []
+    for env in ("ProgramFiles(x86)", "ProgramFiles"):
+        if os.environ.get(env):
+            roots.append(os.path.join(os.environ[env], "Steam"))
+    try:
+        import winreg
+        for hive, key in ((winreg.HKEY_CURRENT_USER, r"Software\Valve\Steam"),
+                          (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Valve\Steam")):
+            try:
+                with winreg.OpenKey(hive, key) as k:
+                    v = winreg.QueryValueEx(k, "SteamPath" if hive == winreg.HKEY_CURRENT_USER else "InstallPath")[0]
+                    roots.append(v)
+            except OSError:
+                pass
+    except ImportError:
+        pass
+    libs = []
+    for r in roots:
+        libs.append(r)
+        vdf = os.path.join(r, "steamapps", "libraryfolders.vdf")
+        if os.path.exists(vdf):
+            for m in re.finditer(r'"path"\s+"([^"]+)"', open(vdf, encoding="utf-8", errors="replace").read()):
+                libs.append(m.group(1).replace("\\\\", "\\"))
+    for lib in libs:
+        cand = os.path.join(lib, "steamapps", "common", GAME_FOLDER)
+        if os.path.isdir(os.path.join(cand, "BmGame", "CookedPC")):
+            return cand
+    return None
+
+
 # ----------------------------------------------------------------------------
-def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--game-dir", default=DEFAULT_GAME_DIR)
-    ap.add_argument("--lang", default="INT", help="package language suffix (INT, DEU, ESN, FRA, ITA); PT-BR fan translations use INT")
-    ap.add_argument("--scale", type=float, default=2.0, help="font size multiplier (default 2)")
-    ap.add_argument("--font", default=None, help="Rockwell .ttf to render from (default: %s)" % DEFAULT_TTF)
-    ap.add_argument("--dump-fontlib", action="store_true", help="write fonts_en.gfx next to this script and exit")
-    ap.add_argument("--restore", action="store_true", help="restore the .original backups")
-    args = ap.parse_args()
-
-    if not 1.2 <= args.scale <= 3.0:
-        sys.exit("--scale must be between 1.2 and 3")
-    cooked = os.path.join(args.game_dir, "BmGame", "CookedPC")
+def targets_for(game_dir, lang):
+    cooked = os.path.join(game_dir, "BmGame", "CookedPC")
     if not os.path.isdir(cooked):
-        sys.exit("game not found at %s (use --game-dir)" % args.game_dir)
-    targets = [os.path.join(cooked, "Startup_%s.upk" % args.lang),
-               os.path.join(cooked, "CommonGame_LOC_%s.upk" % args.lang)]
-    for t in targets:
-        if not os.path.exists(t):
-            sys.exit("missing package: " + t)
+        raise RuntimeError("game not found at %s" % game_dir)
+    t = [os.path.join(cooked, "Startup_%s.upk" % lang), os.path.join(cooked, "CommonGame_LOC_%s.upk" % lang)]
+    for f in t:
+        if not os.path.exists(f):
+            raise RuntimeError("missing package: " + f)
+    return t
 
-    if args.restore:
-        for t in targets:
-            bak = t + ".original"
-            if os.path.exists(bak):
-                shutil.copyfile(bak, t); print("restored", os.path.basename(t))
-            else:
-                print("no backup for", os.path.basename(t), "- nothing to restore")
-        return
 
-    here = os.path.dirname(os.path.abspath(__file__))
-    exe = get_decompressor(os.path.join(here, "tools"))
+def do_restore(game_dir, lang, log=print):
+    for t in targets_for(game_dir, lang):
+        bak = t + ".original"
+        if os.path.exists(bak):
+            shutil.copyfile(bak, t); log("restored " + os.path.basename(t))
+        else:
+            log("no backup for %s - nothing to restore" % os.path.basename(t))
 
-    if args.dump_fontlib:
-        src = targets[0] + ".original" if os.path.exists(targets[0] + ".original") else targets[0]
-        dec, tmp = decompress(exe, src)
-        pkg = Pkg(dec)
-        e = pkg.export("fonts_en.fonts_en")
-        blob = pkg.data[e["off"]:e["off"] + e["size"]]
-        g = blob.find(b"GFX")
-        flen = struct.unpack_from("<I", blob, g + 4)[0]
-        out = os.path.join(here, "fonts_en.gfx")
-        open(out, "wb").write(blob[g:g + flen])
-        shutil.rmtree(tmp, ignore_errors=True)
-        print("wrote", out, "- open it in JPEXS Free Flash Decompiler and export the font 'Rockwell WGL' as TTF")
-        return
 
-    ttf = args.font or DEFAULT_TTF
-    if not os.path.exists(ttf):
-        sys.exit("Rockwell font not found at %s - pass --font <file.ttf> (see README for where to get it)" % ttf)
-    fallback = DEFAULT_TTF if os.path.exists(DEFAULT_TTF) and os.path.abspath(DEFAULT_TTF) != os.path.abspath(ttf) else None
-
+def do_apply(game_dir, lang, scale, ttf=None, log=print):
+    if not 1.2 <= scale <= 3.0:
+        raise RuntimeError("scale must be between 1.2 and 3")
+    targets = targets_for(game_dir, lang)
+    exe = get_decompressor()
+    glyphs = None
     for t in targets:
         name = os.path.basename(t)
         bak = t + ".original"
         if not os.path.exists(bak):
             if not is_compressed(t):
-                sys.exit("%s is not a pristine (compressed) package and no .original backup exists - verify game files in Steam first" % name)
-            shutil.copyfile(t, bak)
-            print("backup:", os.path.basename(bak))
-        print("patching", name)
+                raise RuntimeError("%s is not a pristine package and no .original backup exists - "
+                                   "use 'Verify integrity of game files' in Steam, then run again" % name)
+            shutil.copyfile(t, bak); log("backup: " + os.path.basename(bak))
+        log("patching " + name)
         dec, tmp = decompress(exe, bak)
         pkg = Pkg(dec)
-        rebuild_font(pkg, FONT_NAME, ttf, fallback, args.scale, print)
+        if glyphs is None:
+            if ttf:
+                fe = pkg.export(FONT_NAME); props, _ = pkg.parse_props(fe["off"] + 4)
+                cap = struct.unpack_from("<i", pkg.data, props["Characters"] + 4 + 65 * 21 + 12)[0]
+                glyphs = TtfGlyphs(ttf, round(cap * scale))
+            else:
+                glyphs = SwfGlyphs(extract_fontlib(pkg), FONTLIB_FACE)
+        rebuild_font(pkg, FONT_NAME, glyphs, scale, log)
         open(t, "wb").write(pkg.data)
         shutil.rmtree(tmp, ignore_errors=True)
-        print("  written: %s (%d bytes)" % (name, len(pkg.data)))
-    print("done. Run with --restore to undo.")
+        log("  written: %s (%d bytes)" % (name, len(pkg.data)))
+    log("done.")
+
+
+def interactive():
+    print("=" * 64)
+    print("  Batman: Arkham Asylum GOTY - subtitle size fix")
+    print("  Legendas maiores para o Batman: Arkham Asylum GOTY (Steam)")
+    print("=" * 64)
+    game = find_game_dir()
+    if game:
+        print("\nGame found / Jogo encontrado:\n  " + game)
+    else:
+        print("\nGame not found automatically. / Jogo nao encontrado automaticamente.")
+        game = input("Paste the game folder path / Cole o caminho da pasta do jogo:\n> ").strip().strip('"')
+    try:
+        targets_for(game, "INT")
+    except RuntimeError as ex:
+        print("ERROR:", ex); input("\nPress Enter to exit / Enter para sair"); return
+    print("""
+  1) Apply 2x  (recommended)   / Aplicar 2x (recomendado)
+  2) Apply 1.5x                / Aplicar 1.5x
+  3) Apply 2.5x                / Aplicar 2.5x
+  4) Restore original files    / Restaurar os arquivos originais
+  0) Exit                      / Sair
+""")
+    choice = input("> ").strip()
+    scales = {"1": 2.0, "2": 1.5, "3": 2.5}
+    try:
+        if choice in scales:
+            print("\nClose the game if it is running. / Feche o jogo se estiver aberto.\n")
+            do_apply(game, "INT", scales[choice])
+            print("\nOK! Start the game. / Pronto! Pode abrir o jogo.")
+        elif choice == "4":
+            do_restore(game, "INT")
+            print("\nOriginal files restored. / Arquivos originais restaurados.")
+        else:
+            return
+    except Exception as ex:
+        print("\nERROR / ERRO:", ex)
+    input("\nPress Enter to exit / Enter para sair")
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--apply", action="store_true", help="patch the game (non-interactive)")
+    ap.add_argument("--restore", action="store_true", help="restore the .original backups")
+    ap.add_argument("--game-dir", default=None, help="game folder (default: auto-detect Steam)")
+    ap.add_argument("--lang", default="INT", help="package language suffix (INT, DEU, ESN, FRA, ITA); the PT-BR fan translation uses INT")
+    ap.add_argument("--scale", type=float, default=2.0, help="font size multiplier, 1.2 to 3 (default 2)")
+    ap.add_argument("--font", default=None, help="render from this TrueType file instead of the game's own Rockwell")
+    args = ap.parse_args()
+    if not args.apply and not args.restore:
+        interactive(); return
+    game = args.game_dir or find_game_dir()
+    if not game:
+        sys.exit("game not found - use --game-dir")
+    try:
+        if args.restore:
+            do_restore(game, args.lang)
+        else:
+            do_apply(game, args.lang, args.scale, args.font)
+    except Exception as ex:
+        sys.exit("ERROR: %s" % ex)
 
 
 if __name__ == "__main__":

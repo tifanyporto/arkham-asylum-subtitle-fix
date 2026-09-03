@@ -2,6 +2,8 @@
 
 Bigger, sharp subtitles for **Batman: Arkham Asylum GOTY (Steam)** on modern displays.
 
+*Legendas maiores e nítidas para o Batman: Arkham Asylum GOTY (Steam). [Instruções em português](#em-português).*
+
 ## The problem
 
 The game draws subtitles at a fixed pixel size chosen in 2009 and offers no
@@ -9,7 +11,20 @@ setting to change it. At 1440p, 4K, or on an ultrawide they are tiny to the
 point of being unreadable — a complaint found in forum threads going back over
 a decade, always answered with "there is no fix or mod for this".
 
-## What this does
+## Quick start
+
+1. Download `ArkhamSubtitleFix.exe` from the [latest release](../../releases/latest).
+2. Close the game and double-click the `.exe`.
+3. It finds your Steam install by itself. Press `1` for the recommended 2x size.
+4. Start the game.
+
+To undo: run it again and press `4`. Steam's *Verify integrity of game files*
+also restores the originals (and therefore removes the patch).
+
+No account, no installer, nothing else to download. The tool only touches two
+files inside the game folder and keeps a `.original` backup of each.
+
+## What it does
 
 Dialogue subtitles are drawn by the engine with a bitmap font,
 `BmFonts.MediumFont` — the same font used for the "Loading" text and the
@@ -17,100 +32,55 @@ Dialogue subtitles are drawn by the engine with a bitmap font,
 `SubtitleFontName` setting in the ini is ignored by the game, so the only way
 to get bigger subtitles is a bigger font.
 
-The patcher **re-renders that font at 2x** (any scale from 1.2 to 3 works) from
-a Rockwell TrueType font — the typeface the game uses — so the result is sharp,
-not a blurry upscale. It writes the new font into the two game packages that
-carry a copy of it (`Startup_INT.upk` and `CommonGame_LOC_INT.upk`).
+The patcher **re-renders that font at 2x** (1.5x and 2.5x are offered too)
+from the vector Rockwell font that ships inside the game's own Scaleform font
+library, so the result is sharp, not a blurry upscale. It writes the new font
+into the two game packages that carry a copy of it (`Startup_INT.upk` and
+`CommonGame_LOC_INT.upk`).
 
 Side effect, which most people will consider an improvement: the "Loading"
 text and the cutscene skip prompt get bigger too.
 
-No game files are distributed by this repository. The patcher modifies **your
-own** copy of the game, parses and verifies every structure before writing,
-and keeps a `.original` backup of each file it touches. It works with subtitle
-translation mods (e.g. the PT-BR fan translation): they replace text, this
-replaces a font.
+No game files are distributed by this repository or its releases. The patcher
+modifies **your own** copy of the game, parses and verifies every structure
+before writing, and aborts without touching anything if a file does not look
+like the Steam GOTY build. It works with subtitle translation mods (e.g. the
+PT-BR fan translation): they replace text, this replaces a font.
 
-## Requirements
+## Running from source
 
-- Windows
-- Batman: Arkham Asylum **GOTY** — **Steam** version
-- [Python 3.8+](https://www.python.org/downloads/) (check *"Add python.exe to PATH"* during install)
-- The Pillow imaging library (installed in step 2 below)
-- A **Rockwell** TrueType font. If Microsoft Office is installed you already
-  have it at `C:\Windows\Fonts\ROCK.TTF` and the patcher finds it by itself.
-  Otherwise see [Getting the font](#getting-the-font).
-
-## How to apply
-
-1. **Close the game**, open a terminal (`Win+R`, type `cmd`, Enter) and clone
-   or [download](../../archive/refs/heads/main.zip) this repository:
-
-   ```
-   git clone https://github.com/tifanyporto/arkham-asylum-subtitle-fix.git
-   cd arkham-asylum-subtitle-fix
-   ```
-
-2. Install the one dependency:
-
-   ```
-   pip install -r requirements.txt
-   ```
-
-3. Run the patcher:
-
-   ```
-   python patch.py
-   ```
-
-   If your game is not in the default Steam location, point at it:
-
-   ```
-   python patch.py --game-dir "D:\SteamLibrary\steamapps\common\Batman Arkham Asylum GOTY"
-   ```
-
-   On first run the tool downloads Gildor's freeware UE3 package decompressor
-   (~100 KB) from [gildor.org](https://www.gildor.org/downloads).
-
-4. Start the game. Subtitles are now twice the size.
-
-### Tuning
+Needs Windows and [Python 3.8+](https://www.python.org/downloads/) (tick
+*"Add python.exe to PATH"* when installing).
 
 ```
-python patch.py --scale 1.5
-python patch.py --scale 2.5
+git clone https://github.com/tifanyporto/arkham-asylum-subtitle-fix.git
+cd arkham-asylum-subtitle-fix
+pip install -r requirements.txt
+python patch.py
 ```
 
-Re-running the patcher rebuilds from the backups it kept, no need to revert
-first.
-
-### Getting the font
-
-Rockwell ships with Microsoft Office. If you don't have it, the game itself
-contains the vector version of the font; extract it once:
+Command-line options:
 
 ```
-python patch.py --dump-fontlib
-```
-
-This writes `fonts_en.gfx` next to the script. Open it in
-[JPEXS Free Flash Decompiler](https://github.com/jindrapetrik/jpexs-decompiler)
-(needs Java), go to *fonts → Rockwell WGL*, choose *Export selection → TTF*,
-then run:
-
-```
-python patch.py --font "Rockwell WGL.ttf"
-```
-
-## How to revert
-
-```
+python patch.py --apply                      # 2x, auto-detect Steam
+python patch.py --apply --scale 1.5          # any scale from 1.2 to 3
+python patch.py --apply --game-dir "D:\SteamLibrary\steamapps\common\Batman Arkham Asylum GOTY"
+python patch.py --apply --font Rockwell.ttf  # render from a TrueType file instead
 python patch.py --restore
 ```
 
-This restores the `.original` backups. Alternatively, **Verify integrity of
-game files** on Steam re-downloads the originals — which also means Steam's
-verification *undoes* this patch, so just re-run the patcher if that happens.
+On first run from source the tool downloads Gildor's freeware UE3 package
+decompressor (~100 KB) from [gildor.org](https://www.gildor.org/downloads);
+the `.exe` release has it bundled.
+
+### Building the .exe
+
+```
+pip install pyinstaller
+build_exe.bat
+```
+
+produces `dist\ArkhamSubtitleFix.exe`.
 
 ## Technical notes
 
@@ -118,11 +88,13 @@ verification *undoes* this patch, so just re-run the patcher if that happens.
   They are decompressed once; the engine loads decompressed packages natively.
 - The font is a `UFont` with 276 `FontCharacter` entries (StartU, StartV,
   USize, VSize, page, VerticalOffset) and a `CharRemap` map, plus one or two
-  DXT5 texture pages. The patcher renders each glyph with the TrueType font at
-  the size whose cap height matches the original scaled, packs them into a
-  1024-wide atlas, re-encodes DXT5, appends the new texture as a relocated
-  export at the end of the package and repoints its export-table entry, and
-  rewrites the metrics in place. Nothing else in the package moves.
+  DXT5 texture pages. The patcher parses the `DefineFont3` glyph outlines of
+  "Rockwell WGL" from the game's `fonts_en` Scaleform library, rasterizes each
+  glyph with a scanline filler at the size whose cap height matches the
+  original scaled, packs them into a 1024-wide atlas, re-encodes DXT5,
+  appends the new texture as a relocated export at the end of the package and
+  repoints its export-table entry, and rewrites the metrics in place. Nothing
+  else in the package moves.
 - The same font object exists in `Startup_INT.upk` and in
   `CommonGame_LOC_INT.upk`; the engine keeps whichever it loads first, so both
   are patched.
@@ -130,11 +102,22 @@ verification *undoes* this patch, so just re-run the patcher if that happens.
   `SubtitleFontName` ini setting, `BmFonts.SmallFont`, and the Scaleform text
   fields inside the HUD movie in `BmGame.u`.
 
+## Em português
+
+1. Baixe o `ArkhamSubtitleFix.exe` na [página de releases](../../releases/latest).
+2. Feche o jogo e dê dois cliques no `.exe`.
+3. Ele acha a pasta do jogo sozinho. Aperte `1` para o tamanho recomendado (2x).
+4. Abra o jogo.
+
+Para desfazer, rode de novo e aperte `4`. O "Verificar integridade dos
+arquivos" do Steam também restaura os originais (e remove o patch).
+
+Funciona junto com a tradução PT-BR: ela troca os textos, isto troca a fonte.
+
 ## Credits
 
 - [Gildor's decompress](https://www.gildor.org/) — UE3 package decompression
-- [JPEXS Free Flash Decompiler](https://github.com/jindrapetrik/jpexs-decompiler) — font extraction
-- Rockwell is a typeface of Monotype; no font file is distributed here
+- Rockwell is a typeface of Monotype; the glyphs are read from the user's own game files and no font file is distributed
 
 ## License
 

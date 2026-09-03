@@ -1,6 +1,9 @@
 tools/
 unpacked/
 __pycache__/
+build/
+dist/
+*.spec
 *.original
 *.bak
 fonts_en.gfx
