@@ -17,14 +17,6 @@ jobs:
           python-version: "3.12"
       - name: Install dependencies
         run: pip install pillow pyinstaller
-      - name: Fetch Gildor's decompress tool
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force tools | Out-Null
-          Invoke-WebRequest -Uri https://www.gildor.org/down/47/umodel/decompress.zip -OutFile decompress.zip
-          Expand-Archive decompress.zip -DestinationPath tools -Force
-          Get-ChildItem -Recurse tools -Filter decompress.exe | Select-Object -First 1 | ForEach-Object { Copy-Item $_.FullName tools\decompress.exe -Force }
-          if (-not (Test-Path tools\decompress.exe)) { throw "decompress.exe not found" }
       - name: Build exe
         run: python -m PyInstaller --onefile --console --name ArkhamSubtitleFix --add-binary "tools/decompress.exe;tools" patch.py
       - name: Smoke test
