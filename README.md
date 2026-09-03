@@ -18,6 +18,9 @@ a decade, always answered with "there is no fix or mod for this".
 3. It finds your Steam install by itself. Press `1` for the recommended 2x size.
 4. Start the game.
 
+Windows SmartScreen may show "Windows protected your PC" the first time,
+because the `.exe` is not code-signed: click *More info* → *Run anyway*.
+
 To undo: run it again and press `4`. Steam's *Verify integrity of game files*
 also restores the originals (and therefore removes the patch).
 
@@ -107,6 +110,10 @@ produces `dist\ArkhamSubtitleFix.exe`.
 2. Feche o jogo e dê dois cliques no `.exe`.
 3. Ele acha a pasta do jogo sozinho. Aperte `1` para o tamanho recomendado (2x).
 4. Abra o jogo.
+
+Se o Windows mostrar "O Windows protegeu o computador", clique em *Mais
+informações* → *Executar assim mesmo*. O aviso aparece porque o `.exe` não
+tem assinatura digital.
 
 Para desfazer, rode de novo e aperte `4`. O "Verificar integridade dos
 arquivos" do Steam também restaura os originais (e remove o patch).
