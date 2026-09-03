@@ -28,7 +28,6 @@ Requires Windows, Python 3.8+ and Pillow (the .exe release bundles both).
 """
 
 import argparse
-import io
 import math
 import os
 import re
@@ -37,15 +36,12 @@ import struct
 import subprocess
 import sys
 import tempfile
-import urllib.request
-import zipfile
 
 try:
     from PIL import Image, ImageDraw, ImageFont
 except ImportError:
     sys.exit("Pillow is required:  pip install -r requirements.txt")
 
-DECOMPRESS_URL = "https://www.gildor.org/down/47/umodel/decompress.zip"
 FONT_NAME = "BmFonts.MediumFont"
 FONTLIB_EXPORT = "fonts_en.fonts_en"
 FONTLIB_FACE = "Rockwell WGL"
@@ -521,18 +517,8 @@ def get_decompressor():
                  os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "tools", "decompress.exe")):
         if os.path.exists(cand):
             return cand
-    tools = os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "tools")
-    os.makedirs(tools, exist_ok=True)
-    exe = os.path.join(tools, "decompress.exe")
-    print("Downloading Gildor's decompress tool from %s ..." % DECOMPRESS_URL)
-    data = urllib.request.urlopen(DECOMPRESS_URL, timeout=60).read()
-    with zipfile.ZipFile(io.BytesIO(data)) as z:
-        for n in z.namelist():
-            if n.lower().endswith("decompress.exe"):
-                open(exe, "wb").write(z.read(n)); break
-    if not os.path.exists(exe):
-        raise RuntimeError("could not obtain decompress.exe - download it from gildor.org into " + tools)
-    return exe
+    raise RuntimeError("tools\\decompress.exe is missing - get Gildor's \"decompress\" tool from "
+                       "https://www.gildor.org/downloads and put it in the tools folder next to this program")
 
 
 def decompress(exe, src):

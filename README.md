@@ -69,9 +69,8 @@ python patch.py --apply --font Rockwell.ttf  # render from a TrueType file inste
 python patch.py --restore
 ```
 
-On first run from source the tool downloads Gildor's freeware UE3 package
-decompressor (~100 KB) from [gildor.org](https://www.gildor.org/downloads);
-the `.exe` release has it bundled.
+`tools\decompress.exe` is Gildor's freeware UE3 package decompressor from
+[gildor.org](https://www.gildor.org/downloads); the `.exe` release has it bundled.
 
 ### Building the .exe
 
